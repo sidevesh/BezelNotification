@@ -173,6 +173,7 @@ public struct BezelParameters {
     
     public static let defaultCornerRadius: CGFloat = 18
     public static let defaultBackgroundTint = NSColor(calibratedWhite: 0, alpha: 1)
+    public static let defaultLightModeBackgroundTint = NSColor(calibratedWhite: 1, alpha: 1)
     public static let defaultMessageLabelBaselineOffsetFromBottomOfBezel: CGFloat = 20
     public static let defaultMessageLabelFontSize: CGFloat = 18
     public static let defaultMessageLabelFont = NSFont.systemFont(ofSize: defaultMessageLabelFontSize)
@@ -297,7 +298,13 @@ public class BHBezelWindow : NSWindow {
     private lazy var bezelContentView: BHBezelContentView = {
         let bezelContentView = BHBezelContentView(parameters: self.parameters)
         bezelContentView.wantsLayer = true
-        bezelContentView.layer?.backgroundColor = parameters.backgroundTint.cgColor
+        
+        // Apply tint based on appearance
+        let backgroundTint = self.effectiveAppearance.isDarkMode ? 
+            self.parameters.backgroundTint : 
+            BezelParameters.defaultLightModeBackgroundTint.withAlphaComponent(0.15)
+        
+        bezelContentView.layer?.backgroundColor = backgroundTint.cgColor
         return bezelContentView
     }()
     
@@ -326,15 +333,35 @@ public class BHBezelWindow : NSWindow {
         self.maxSize = contentRect.size
         
         self.isReleasedWhenClosed = false
-        self.level = .dock
+        self.level = .floating
         self.ignoresMouseEvents = true
-        self.appearance = NSAppearance(named: .vibrantDark)
+        
+        // Use system appearance rather than forcing vibrantDark
+        self.appearance = NSAppearance.current
         self.isOpaque = false
         self.backgroundColor = .clear
+        
+        // Register for appearance changes
+        NotificationCenter.default.addObserver(self, 
+                                              selector: #selector(updateAppearance), 
+                                              name: NSApplication.didChangeScreenParametersNotification, 
+                                              object: nil)
         
         addComponents()
     }
     
+    @objc private func updateAppearance() {
+        // Update appearance-dependent elements when system appearance changes
+        let backgroundTint = self.effectiveAppearance.isDarkMode ? 
+            parameters.backgroundTint : 
+            BezelParameters.defaultLightModeBackgroundTint.withAlphaComponent(0.15)
+            
+        bezelContentView.layer?.backgroundColor = backgroundTint.cgColor
+        
+        if let visualEffectView = self.contentView as? NSVisualEffectView {
+            updateVisualEffectViewAppearance(visualEffectView)
+        }
+    }
     
     private func addComponents() {
         guard let contentView = self.contentView else {
@@ -351,36 +378,41 @@ public class BHBezelWindow : NSWindow {
             bezelContentView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             bezelContentView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
         ])
-
-//        messageTextLabel.translatesAutoresizingMaskIntoConstraints = false
-//        visualEffectView.addSubview(messageTextLabel)
-//        NSLayoutConstraint.activate([
-//            messageTextLabel.centerXAnchor.constraint(equalTo: visualEffectView.centerXAnchor),
-//            messageTextLabel.lastBaselineAnchor.constraint(equalTo: visualEffectView.bottomAnchor, constant: -labelBaselineOffsetFromBottomOfBezel)
-//        ])
     }
-    
     
     private func makeVisualEffectsBackingView() -> NSVisualEffectView {
         let visualEffectView = NSVisualEffectView()
         visualEffectView.wantsLayer = true
         visualEffectView.blendingMode = .behindWindow
-        if #available(macOS 10.14, *) {
-            visualEffectView.material = .hudWindow
-        } else {
-            visualEffectView.material = .dark
-        }
+        
+        updateVisualEffectViewAppearance(visualEffectView)
+        
         visualEffectView.state = .active
         visualEffectView.maskImage = .roundedRectMask(size: self.parameters.size.cgSize,
                                                       cornerRadius: self.parameters.cornerRadius)
         return visualEffectView
+    }
+    
+    private func updateVisualEffectViewAppearance(_ visualEffectView: NSVisualEffectView) {
+        if #available(macOS 10.14, *) {
+            visualEffectView.material = self.effectiveAppearance.isDarkMode ? .hudWindow : .toolTip
+        } else {
+            visualEffectView.material = self.effectiveAppearance.isDarkMode ? .dark : .light
+        }
+        
+        visualEffectView.appearance = self.effectiveAppearance.isDarkMode ? 
+            NSAppearance(named: .vibrantDark) : 
+            NSAppearance(named: .vibrantLight)
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 }
 
 
 
 /// The view powering the `BHBezelWindow`'s appearance.
-/// If you _really, really_ need _extreme_ control, you may use this. Don't, though, if you can avoid it.
 public class BHBezelContentView: NSView {
     
     let parameters: BezelParameters
@@ -407,6 +439,7 @@ public class BHBezelContentView: NSView {
                                                                           offsetFromBottom: parameters.messageLabelBaselineOffsetFromBottomOfBezel,
                                                                           font: parameters.messageLabelFont)
         
+        // Draw icon if available
         if let icon = parameters.icon {
             let bezelSize = parameters.size.cgSize
             let bezelBounds = NSRect(origin: .zero, size: bezelSize)
@@ -430,10 +463,15 @@ public class BHBezelContentView: NSView {
             )
         }
 
+        // Determine text color based on appearance
+        let textColor = self.effectiveAppearance.isDarkMode ? 
+            parameters.messageLabelColor.withAlphaComponent(parameters.messageLabelColor.alphaComponent * 0.8) :
+            NSColor.black.withAlphaComponent(0.8)
+        
         context.setTextDrawingMode(.fill)
         context.draw(text: parameters.messageText,
                      at: textBounds.origin,
-                     color: parameters.messageLabelColor.withAlphaComponent(parameters.messageLabelColor.alphaComponent * 0.8),
+                     color: textColor,
                      font: parameters.messageLabelFont)
     }
 }
@@ -514,6 +552,19 @@ extension BezelLocation {
     }
 }
 
+
+/// Extension to provide a version-compatible way to check if the appearance is dark mode
+private extension NSAppearance {
+    var isDarkMode: Bool {
+        if #available(macOS 10.14, *) {
+            return self.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        } else {
+            // Before 10.14, check if appearance name contains "Dark" or "Vibrant"
+            let appearanceName = self.name
+            return appearanceName == .vibrantDark || String(describing: appearanceName).contains("Dark")
+        }
+    }
+}
 
 
 private extension NSScreen {
